@@ -13,6 +13,8 @@ app.use(express.json());
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const PORTAL_URL = 'https://stupendous-sable-fc0707.netlify.app/portal.html';
+const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL || 'lumetra1agency@gmail.com';
 
 const TIER_PLANS = {
   Essentials: [
@@ -67,7 +69,61 @@ const TIER_PLANS = {
   ],
 };
 
-app.get('/', (req, res) => res.json({ status: 'COaaS backend running', timestamp: new Date().toISOString() }));
+// ── Email helper ─────────────────────────────────────────
+async function sendEmail({ to, subject, html }) {
+  if (!process.env.RESEND_API_KEY) return;
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: 'Lumetra <onboarding@resend.dev>', to: Array.isArray(to) ? to : [to], subject, html })
+    });
+    const data = await res.json();
+    console.log('Email sent:', subject, '-> ', to);
+  } catch (err) { console.error('Email error:', err.message); }
+}
+
+function emailStyle(content) {
+  return '<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:40px 24px;background:#060608;color:#f0eeff;"><div style="margin-bottom:28px;font-size:22px;font-weight:800;color:#9B7FEF;">Lumetra</div>' + content + '<p style="color:#4a4760;font-size:12px;margin-top:32px;">— The Lumetra team</p></div>';
+}
+
+async function sendWelcomeEmail(client, accessCode) {
+  await sendEmail({
+    to: client.contact_email,
+    subject: 'Welcome to Lumetra — your content portal is ready',
+    html: emailStyle('<h1 style="font-size:26px;font-weight:700;margin-bottom:12px;">Welcome, ' + (client.contact_name || client.company_name) + '.</h1><p style="color:#8a87aa;line-height:1.7;margin-bottom:24px;">Your content portal is live. Each month we generate your full content plan and drop it in your portal for review. Your only job is to approve.</p><div style="background:#0d0d12;border:1px solid rgba(155,127,239,0.3);border-radius:12px;padding:24px;margin-bottom:24px;"><p style="color:#8a87aa;margin-bottom:8px;">Portal: <a href="' + PORTAL_URL + '" style="color:#9B7FEF;">' + PORTAL_URL + '</a></p><p style="color:#8a87aa;margin-bottom:8px;">Email: <strong style="color:#f0eeff;">' + client.contact_email + '</strong></p><p style="color:#8a87aa;">Access code: <strong style="font-size:22px;letter-spacing:0.12em;color:#9B7FEF;">' + accessCode + '</strong></p></div><a href="' + PORTAL_URL + '" style="display:inline-block;padding:12px 24px;background:#9B7FEF;color:#000;font-weight:700;border-radius:10px;text-decoration:none;">Open my portal</a>')
+  });
+}
+
+async function sendContentReadyEmail(client, totalPieces, breakdown) {
+  const accessCode = client.id.replace(/-/g,'').slice(-6).toUpperCase();
+  const month = new Date().toLocaleString('en-US', { month: 'long' });
+  const breakdownHtml = Object.entries(breakdown).map(([k,v]) => '<li style="color:#8a87aa;padding:3px 0;">' + v + ' ' + k + (v>1?'s':'') + '</li>').join('');
+  await sendEmail({
+    to: client.contact_email,
+    subject: 'Your ' + month + ' content is ready to review — ' + totalPieces + ' pieces',
+    html: emailStyle('<h1 style="font-size:26px;font-weight:700;margin-bottom:12px;">Your content is ready.</h1><p style="color:#8a87aa;line-height:1.7;margin-bottom:24px;">' + totalPieces + ' pieces for ' + client.company_name + ' are in your portal, written in your voice and ready to approve.</p><div style="background:#0d0d12;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:24px;margin-bottom:24px;"><p style="font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:#4a4760;margin-bottom:10px;">This month</p><ul style="list-style:none;padding:0;margin:0;">' + breakdownHtml + '</ul></div><a href="' + PORTAL_URL + '" style="display:inline-block;padding:12px 24px;background:#9B7FEF;color:#000;font-weight:700;border-radius:10px;text-decoration:none;">Review my content</a><p style="color:#4a4760;font-size:12px;margin-top:16px;">Login: ' + client.contact_email + ' / ' + accessCode + '</p>')
+  });
+}
+
+async function sendFeedbackEmail(client, draftTitle, feedbackText) {
+  await sendEmail({
+    to: OPERATOR_EMAIL,
+    subject: 'Revision requested — ' + client.company_name + ': "' + draftTitle + '"',
+    html: emailStyle('<h1 style="font-size:24px;font-weight:700;margin-bottom:8px;">Revision requested</h1><p style="color:#8a87aa;margin-bottom:20px;"><strong style="color:#f0eeff;">' + client.company_name + '</strong> (' + client.contact_email + ') wants changes.</p><div style="background:#0d0d12;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:24px;"><p style="font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:#4a4760;margin-bottom:6px;">Piece</p><p style="color:#f0eeff;margin-bottom:16px;">' + draftTitle + '</p><p style="font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:#4a4760;margin-bottom:6px;">Feedback</p><p style="color:#f0eeff;line-height:1.7;">' + feedbackText + '</p></div>')
+  });
+}
+
+async function sendSignupEmail(bizName, contactName, email, plan) {
+  await sendEmail({
+    to: OPERATOR_EMAIL,
+    subject: 'New signup — ' + bizName + ' (' + (plan || 'plan TBD') + ')',
+    html: emailStyle('<h1 style="font-size:24px;font-weight:700;margin-bottom:8px;color:#7EE8A2;">New signup ✦</h1><p style="color:#8a87aa;margin-bottom:20px;">Someone just submitted the Get Started form.</p><div style="background:#0d0d12;border:1px solid rgba(126,232,162,0.3);border-radius:12px;padding:24px;"><p style="color:#8a87aa;margin-bottom:8px;">Business: <strong style="color:#f0eeff;">' + bizName + '</strong></p><p style="color:#8a87aa;margin-bottom:8px;">Name: <strong style="color:#f0eeff;">' + (contactName||'Not provided') + '</strong></p><p style="color:#8a87aa;margin-bottom:8px;">Email: <strong style="color:#9B7FEF;">' + email + '</strong></p><p style="color:#8a87aa;">Plan: <strong style="color:#f0eeff;">' + (plan||'Not sure yet') + '</strong></p></div><p style="color:#8a87aa;margin-top:16px;">Reply to <a href="mailto:' + email + '" style="color:#9B7FEF;">' + email + '</a> within 24 hours.</p>')
+  });
+}
+
+// ── Health check ─────────────────────────────────────────
+app.get('/', (req, res) => res.json({ status: 'Lumetra backend running', timestamp: new Date().toISOString() }));
 
 app.get('/tiers', (req, res) => {
   const summary = {};
@@ -79,6 +135,28 @@ app.get('/tiers', (req, res) => {
   res.json({ tiers: summary });
 });
 
+// ── Signup notification endpoint ─────────────────────────
+app.post('/notify-signup', async (req, res) => {
+  try {
+    const { biz_name, contact_name, email, plan } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    await sendSignupEmail(biz_name, contact_name, email, plan);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Feedback endpoint ────────────────────────────────────
+app.post('/feedback', async (req, res) => {
+  try {
+    const { draft_id, client_id, feedback_text } = req.body;
+    if (!draft_id || !client_id || !feedback_text) return res.status(400).json({ error: 'draft_id, client_id, feedback_text required' });
+    const { data: client } = await supabase.from('clients').select('*').eq('id', client_id).single();
+    const { data: brief } = await supabase.from('content_briefs').select('title').eq('id', (await supabase.from('drafts').select('brief_id').eq('id', draft_id).single()).data?.brief_id).single();
+    await sendFeedbackEmail(client, brief?.title || 'Untitled piece', feedback_text);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/clients', async (req, res) => {
   try {
     const { company_name, contact_email } = req.body;
@@ -86,6 +164,9 @@ app.post('/clients', async (req, res) => {
     const brand_voice_prompt = buildBrandVoicePrompt(req.body);
     const { data, error } = await supabase.from('clients').insert([{ ...req.body, brand_voice_prompt, status: 'active' }]).select().single();
     if (error) throw error;
+    // Send welcome email with access code
+    const accessCode = data.id.replace(/-/g,'').slice(-6).toUpperCase();
+    sendWelcomeEmail(data, accessCode).catch(console.error);
     res.status(201).json({ success: true, client: data });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -110,7 +191,7 @@ app.get('/clients/:id', async (req, res) => {
 app.post('/briefs', async (req, res) => {
   try {
     const { client_id, content_type } = req.body;
-    if (!client_id || !content_type) return res.status(400).json({ error: 'client_id and content_type are required' });
+    if (!client_id || !content_type) return res.status(400).json({ error: 'client_id and content_type required' });
     const { data, error } = await supabase.from('content_briefs').insert([{ ...req.body, due_date: req.body.due_date || new Date().toISOString().split('T')[0], status: 'pending' }]).select().single();
     if (error) throw error;
     res.status(201).json({ success: true, brief: data });
@@ -120,7 +201,7 @@ app.post('/briefs', async (req, res) => {
 app.post('/generate', async (req, res) => {
   try {
     const { brief_id, client_id } = req.body;
-    if (!brief_id || !client_id) return res.status(400).json({ error: 'brief_id and client_id are required' });
+    if (!brief_id || !client_id) return res.status(400).json({ error: 'brief_id and client_id required' });
     const [clientRes, briefRes] = await Promise.all([
       supabase.from('clients').select('*').eq('id', client_id).single(),
       supabase.from('content_briefs').select('*').eq('id', brief_id).single()
@@ -153,28 +234,33 @@ app.post('/generate-monthly/:client_id', async (req, res) => {
     if (client.status === 'payment_failed') return res.status(402).json({ error: 'Payment required' });
     const plan = TIER_PLANS[client.retainer_tier] || TIER_PLANS['Essentials'];
     const month = new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' });
-    res.json({ success: true, message: 'Generating ' + plan.length + ' pieces for ' + client.company_name + '. Check the portal as they complete.', total: plan.length, tier: client.retainer_tier, breakdown: plan.reduce((acc, p) => { acc[p.content_type] = (acc[p.content_type] || 0) + 1; return acc; }, {}) });
+    const breakdown = plan.reduce((acc, p) => { acc[p.content_type] = (acc[p.content_type] || 0) + 1; return acc; }, {});
+    res.json({ success: true, message: 'Generating ' + plan.length + ' pieces for ' + client.company_name, total: plan.length, tier: client.retainer_tier, breakdown });
+    const results = [];
     for (let i = 0; i < plan.length; i++) {
       const piece = plan[i];
       try {
         const titleMsg = await anthropic.messages.create({ model: 'claude-sonnet-4-20250514', max_tokens: 100, messages: [{ role: 'user', content: 'Generate a compelling title for a ' + piece.content_type + ' for "' + client.company_name + '" which is: ' + (client.product_description || 'a local business') + '. Target: ' + (client.ideal_customer || 'local customers') + '. Topics: ' + (client.topics || 'their services') + '. Funnel stage: ' + piece.funnel_stage + '. Reply with ONLY the title.' }] });
         const title = titleMsg.content[0].text.trim().replace(/^["']|["']$/g, '');
-        const { data: brief } = await supabase.from('content_briefs').insert([{ client_id: client.id, content_type: piece.content_type, title, funnel_stage: piece.funnel_stage, word_count: piece.word_count, angle: 'Month: ' + month + '. Write the most useful, concrete piece for ' + (client.ideal_customer || 'this audience') + '. Real value, no fluff.', reader_takeaway: 'The reader leaves with clear, actionable information.', primary_keyword: client.topics ? client.topics.split(',')[0].trim() : '', due_date: new Date().toISOString().split('T')[0], status: 'pending' }]).select().single();
+        const { data: brief } = await supabase.from('content_briefs').insert([{ client_id: client.id, content_type: piece.content_type, title, funnel_stage: piece.funnel_stage, word_count: piece.word_count, angle: 'Month: ' + month + '. Write the most useful, concrete piece for ' + (client.ideal_customer || 'this audience') + '.', reader_takeaway: 'Clear, actionable information.', primary_keyword: client.topics ? client.topics.split(',')[0].trim() : '', due_date: new Date().toISOString().split('T')[0], status: 'pending' }]).select().single();
         const msg = await anthropic.messages.create({ model: 'claude-sonnet-4-20250514', max_tokens: 4096, system: client.brand_voice_prompt, messages: [{ role: 'user', content: buildContentPrompt(brief) }] });
         const content = msg.content[0].text;
-        const wordCount = content.split(/s+/).length;
-        await supabase.from('drafts').insert([{ client_id: client.id, brief_id: brief.id, content, word_count: wordCount, model_used: 'claude-sonnet-4-20250514', tokens_used: msg.usage.input_tokens + msg.usage.output_tokens, status: 'draft' }]);
+        await supabase.from('drafts').insert([{ client_id: client.id, brief_id: brief.id, content, word_count: content.split(/s+/).length, model_used: 'claude-sonnet-4-20250514', tokens_used: msg.usage.input_tokens + msg.usage.output_tokens, status: 'draft' }]);
         await supabase.from('content_briefs').update({ status: 'generated' }).eq('id', brief.id);
-        console.log('  Generated ' + (i+1) + '/' + plan.length + ': ' + piece.content_type + ' - ' + title);
-      } catch (err) { console.error('  Failed piece ' + (i+1) + ':', err.message); }
+        results.push({ title, content_type: piece.content_type });
+        console.log('Generated ' + (i+1) + '/' + plan.length + ': ' + piece.content_type);
+      } catch (err) { console.error('Failed piece ' + (i+1) + ':', err.message); }
     }
+    // Email client when all done
+    sendContentReadyEmail(client, results.length, breakdown).catch(console.error);
+    console.log('Monthly generation complete for ' + client.company_name + ': ' + results.length + ' pieces');
   } catch (err) { if (!res.headersSent) res.status(500).json({ error: err.message }); }
 });
 
 app.post('/approve', async (req, res) => {
   try {
     const { draft_id } = req.body;
-    if (!draft_id) return res.status(400).json({ error: 'draft_id is required' });
+    if (!draft_id) return res.status(400).json({ error: 'draft_id required' });
     const { data, error } = await supabase.from('drafts').update({ status: 'approved', approved_at: new Date().toISOString() }).eq('id', draft_id).select().single();
     if (error) throw error;
     res.json({ success: true, draft: data });
@@ -241,24 +327,23 @@ app.post('/billing/webhook', async (req, res) => {
 cron.schedule('0 8 1 * *', async () => {
   console.log('Monthly cron: generating for all active clients...');
   try {
-    const { data: clients } = await supabase.from('clients').select('id, company_name, retainer_tier').eq('status', 'active');
+    const { data: clients } = await supabase.from('clients').select('id, company_name').eq('status', 'active');
     for (const client of (clients || [])) {
       await fetch('http://localhost:' + PORT + '/generate-monthly/' + client.id, { method: 'POST' });
-      console.log('Started monthly generation for ' + client.company_name);
     }
-  } catch (err) { console.error('Monthly cron error:', err); }
+  } catch (err) { console.error('Cron error:', err); }
 });
 
 function buildBrandVoicePrompt(data) {
   const tones = Array.isArray(data.tones) ? data.tones.join(', ') : (data.tones || 'professional, friendly');
-  return 'Brand Voice - ' + data.company_name + '\nAbout: ' + (data.product_description || '[description]') + '\nTarget customer: ' + (data.ideal_customer || 'local customers') + (data.differentiator ? '\nDifferentiator: ' + data.differentiator : '') + '\nTone: ' + tones + '\nFormality: ' + (data.formality || 'Balanced') + '\nRules:\n- Sound like a real person\n- Lead with value not features\n- Short sentences, active voice\n- Specific details beat vague claims\n- Never use "In todays fast-paced world..."' + (data.avoid_list ? '\n- Never: ' + data.avoid_list : '') + (data.extra_notes ? '\nNotes: ' + data.extra_notes : '');
+  return 'Brand Voice - ' + data.company_name + '\nAbout: ' + (data.product_description || '[description]') + '\nTarget customer: ' + (data.ideal_customer || 'local customers') + (data.differentiator ? '\nDifferentiator: ' + data.differentiator : '') + '\nTone: ' + tones + '\nFormality: ' + (data.formality || 'Balanced') + '\nRules: Lead with value. Short sentences. Active voice. Specific details.' + (data.avoid_list ? '\nNever: ' + data.avoid_list : '') + (data.extra_notes ? '\nNotes: ' + data.extra_notes : '');
 }
 
 function buildContentPrompt(brief) {
-  const instructions = { 'Blog Post': 'Write a complete SEO-optimized blog post with compelling intro, clear headings, strong conclusion.', 'Email Newsletter': 'Write a concise email newsletter with subject line at top, short paragraphs, one clear CTA.', 'LinkedIn Post': 'Write a LinkedIn post. Hook first line (no "I" to start). Short punchy lines. End with question or CTA. No hashtags.', 'Social Media Post': 'Write an engaging social media post. Short, punchy, conversational. Clear CTA.', 'Monthly Newsletter': 'Write a monthly newsletter: personal note, key updates, tips, and CTA sections.', 'Case Study': 'Write a case study with Challenge, Solution, Results sections. Use specific numbers.', 'Landing Page Copy': 'Write landing page copy: headline, subheadline, benefits (not features), social proof placeholder, CTA.' };
+  const instructions = { 'Blog Post': 'Write a complete SEO-optimized blog post with compelling intro, clear headings, strong conclusion.', 'Email Newsletter': 'Write a concise email newsletter with subject line at top, short paragraphs, one clear CTA.', 'LinkedIn Post': 'Write a LinkedIn post. Hook first line (no "I" to start). Short punchy lines. End with question or CTA. No hashtags.', 'Social Media Post': 'Write an engaging social media post. Short, punchy, conversational. Clear CTA.', 'Monthly Newsletter': 'Write a monthly newsletter: personal note, key updates, tips, and CTA sections.', 'Case Study': 'Write a case study with Challenge, Solution, Results sections. Use specific numbers.', 'Landing Page Copy': 'Write landing page copy: headline, subheadline, benefits, social proof placeholder, CTA.' };
   const instr = instructions[brief.content_type] || 'Write a complete publish-ready piece.';
-  return instr + '\n\nBrief:\n- Title: ' + (brief.title || 'Choose compelling title') + '\n- Word count: ~' + (brief.word_count || 800) + '\n- Funnel stage: ' + (brief.funnel_stage || 'Top of funnel') + (brief.angle ? '\n- Angle: ' + brief.angle : '') + (brief.primary_keyword ? '\n- Keyword: ' + brief.primary_keyword : '') + (brief.cta ? '\n- CTA: ' + brief.cta : '') + '\n\nApply brand voice. Produce complete publish-ready piece, no placeholders.';
+  return instr + '\n\nBrief:\n- Title: ' + (brief.title || 'Choose compelling title') + '\n- Word count: ~' + (brief.word_count || 800) + '\n- Funnel stage: ' + (brief.funnel_stage || 'Top of funnel') + (brief.angle ? '\n- Angle: ' + brief.angle : '') + (brief.primary_keyword ? '\n- Keyword: ' + brief.primary_keyword : '') + (brief.cta ? '\n- CTA: ' + brief.cta : '') + '\n\nApply brand voice. Produce complete publish-ready piece.';
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('COaaS backend running on port ' + PORT));
+app.listen(PORT, () => console.log('Lumetra backend running on port ' + PORT));
