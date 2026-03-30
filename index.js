@@ -188,6 +188,18 @@ app.get('/clients/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.delete('/clients/:id', async (req, res) => {
+  try {
+    const { error: draftsErr } = await supabase.from('drafts').delete().eq('client_id', req.params.id);
+    if (draftsErr) throw draftsErr;
+    const { error: briefsErr } = await supabase.from('content_briefs').delete().eq('client_id', req.params.id);
+    if (briefsErr) throw briefsErr;
+    const { error: clientErr } = await supabase.from('clients').delete().eq('id', req.params.id);
+    if (clientErr) throw clientErr;
+    res.json({ success: true, message: 'Client and all associated data deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/briefs', async (req, res) => {
   try {
     const { client_id, content_type } = req.body;
