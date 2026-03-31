@@ -140,8 +140,40 @@ app.post('/notify-signup', async (req, res) => {
   try {
     const { biz_name, contact_name, email, plan } = req.body;
     if (!email) return res.status(400).json({ error: 'email required' });
+
+    // 1. Save lead to database
+    await supabase.from('leads').insert([{ biz_name, contact_name, email, plan, status: 'new' }]);
+
+    // 2. Send thank you email to the customer
+    await sendEmail({
+      to: email,
+      subject: 'You\'re on our list — Lumetra',
+      html: emailStyle('<h1 style="font-size:26px;font-weight:700;margin-bottom:12px;">Thanks for reaching out.</h1><p style="color:#8a87aa;line-height:1.7;margin-bottom:20px;">We got your info and we\'ll be in touch within 24 hours to get you set up.</p><p style="color:#8a87aa;line-height:1.7;margin-bottom:20px;">Here\'s what happens next:</p><div style="background:#0d0d12;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:24px;margin-bottom:24px;"><p style="color:#8a87aa;margin-bottom:12px;">✦ <strong style="color:#f0eeff;">We review your info</strong> — usually within a few hours</p><p style="color:#8a87aa;margin-bottom:12px;">✦ <strong style="color:#f0eeff;">We set up your account</strong> — you\'ll get a welcome email with your portal login</p><p style="color:#8a87aa;">✦ <strong style="color:#f0eeff;">Your first content drops</strong> — blogs, emails, and social posts written in your voice</p></div><p style="color:#4a4760;font-size:13px;">Questions? Reply to this email anytime.</p>')
+    });
+
+    // 3. Notify operator
     await sendSignupEmail(biz_name, contact_name, email, plan);
+
     res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET all leads (for operator dashboard)
+app.get('/leads', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('leads').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ leads: data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PATCH lead status
+app.patch('/leads/:id', async (req, res) => {
+  try {
+    const { status } = req.body;
+    const { data, error } = await supabase.from('leads').update({ status }).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ success: true, lead: data });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
