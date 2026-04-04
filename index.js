@@ -13,7 +13,7 @@ app.use(express.json());
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-const PORTAL_URL = 'https://stupendous-sable-fc0707.netlify.app/portal.html';
+const PORTAL_URL = 'https://lumetraagency.com/portal.html';
 const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL || 'lumetra1agency@gmail.com';
 
 const TIER_PLANS = {
@@ -76,7 +76,7 @@ async function sendEmail({ to, subject, html }) {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: 'Lumetra <onboarding@resend.dev>', to: Array.isArray(to) ? to : [to], subject, html })
+      body: JSON.stringify({ from: 'Lumetra <hello@lumetraagency.com>', to: Array.isArray(to) ? to : [to], subject, html })
     });
     const data = await res.json();
     console.log('Email sent:', subject, '-> ', to);
