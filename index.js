@@ -417,6 +417,125 @@ app.patch('/drafts/:id/schedule', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+
+// ── Integrations ─────────────────────────────────────────
+
+// Save a client integration (WordPress, Mailchimp, etc.)
+app.post('/integrations', async (req, res) => {
+  try {
+    const { client_id, platform, credentials } = req.body;
+    if (!client_id || !platform || !credentials) return res.status(400).json({ error: 'client_id, platform, credentials required' });
+    // Upsert - replace existing integration for same platform
+    const { data: existing } = await supabase.from('client_integrations').select('id').eq('client_id', client_id).eq('platform', platform).single();
+    let data, error;
+    if (existing) {
+      ({ data, error } = await supabase.from('client_integrations').update({ credentials, status: 'active' }).eq('id', existing.id).select().single());
+    } else {
+      ({ data, error } = await supabase.from('client_integrations').insert([{ client_id, platform, credentials }]).select().single());
+    }
+    if (error) throw error;
+    res.json({ success: true, integration: data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get all integrations for a client
+app.get('/integrations/:client_id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('client_integrations').select('id, platform, status, created_at').eq('client_id', req.params.client_id);
+    if (error) throw error;
+    res.json({ integrations: data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Delete an integration
+app.delete('/integrations/:id', async (req, res) => {
+  try {
+    const { error } = await supabase.from('client_integrations').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Publish an approved draft to connected integrations
+app.post('/publish/:draft_id', async (req, res) => {
+  try {
+    const { data: draft, error: draftErr } = await supabase.from('drafts').select('*, content_briefs(title, content_type)').eq('id', req.params.draft_id).single();
+    if (draftErr || !draft) return res.status(404).json({ error: 'Draft not found' });
+    const content = draft.edited_content || draft.content;
+    const contentType = draft.content_briefs?.content_type || 'Content';
+    const title = draft.content_briefs?.title || 'Untitled';
+    const { data: integrations } = await supabase.from('client_integrations').select('*').eq('client_id', draft.client_id).eq('status', 'active');
+    if (!integrations || integrations.length === 0) return res.status(400).json({ error: 'No integrations connected' });
+
+    const results = [];
+    for (const integration of integrations) {
+      // Only publish to relevant platform based on content type
+      const relevant = isRelevantPlatform(contentType, integration.platform);
+      if (!relevant) { results.push({ platform: integration.platform, status: 'skipped', reason: 'Content type not relevant for this platform' }); continue; }
+      try {
+        let result;
+        if (integration.platform === 'WordPress') result = await publishToWordPress(integration.credentials, title, content);
+        else if (integration.platform === 'Mailchimp') result = await publishToMailchimp(integration.credentials, title, content);
+        else result = { status: 'pending', message: 'Platform queued for publishing' };
+        results.push({ platform: integration.platform, status: 'success', result });
+      } catch (err) {
+        results.push({ platform: integration.platform, status: 'failed', error: err.message });
+      }
+    }
+
+    // Update draft publish status
+    const allSuccess = results.filter(r => r.status !== 'skipped').every(r => r.status === 'success');
+    await supabase.from('drafts').update({ publish_status: allSuccess ? 'published' : 'partial', published_at: new Date().toISOString() }).eq('id', req.params.draft_id);
+
+    res.json({ success: true, results });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+function isRelevantPlatform(contentType, platform) {
+  const map = {
+    'Blog Post': ['WordPress'],
+    'Email Newsletter': ['Mailchimp'],
+    'LinkedIn Post': ['LinkedIn'],
+    'Social Media Post': ['Instagram', 'Facebook', 'Twitter/X', 'Google Business'],
+    'Monthly Newsletter': ['Mailchimp'],
+  };
+  const relevant = map[contentType] || [];
+  return relevant.includes(platform);
+}
+
+async function publishToWordPress(creds, title, content) {
+  const { url, username, app_password } = creds;
+  const wpUrl = url.replace(/\/+$/, '') + '/wp-json/wp/v2/posts';
+  const auth = Buffer.from(username + ':' + app_password).toString('base64');
+  const res = await fetch(wpUrl, {
+    method: 'POST',
+    headers: { 'Authorization': 'Basic ' + auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, content: content.replace(/\n/g, '<br>'), status: 'draft' })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || 'WordPress publish failed');
+  return { post_id: data.id, post_url: data.link, status: 'draft' };
+}
+
+async function publishToMailchimp(creds, title, content) {
+  const { api_key, list_id } = creds;
+  const dc = api_key.split('-')[1];
+  const campaignRes = await fetch('https://' + dc + '.api.mailchimp.com/3.0/campaigns', {
+    method: 'POST',
+    headers: { 'Authorization': 'apikey ' + api_key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'regular', recipients: { list_id }, settings: { subject_line: title, from_name: 'Lumetra', reply_to: process.env.OPERATOR_EMAIL } })
+  });
+  const campaign = await campaignRes.json();
+  if (!campaignRes.ok) throw new Error(campaign.detail || 'Mailchimp campaign creation failed');
+  const htmlContent = '<html><body>' + content.replace(/\n/g, '<br>') + '</body></html>';
+  await fetch('https://' + dc + '.api.mailchimp.com/3.0/campaigns/' + campaign.id + '/content', {
+    method: 'PUT',
+    headers: { 'Authorization': 'apikey ' + api_key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ html: htmlContent })
+  });
+  return { campaign_id: campaign.id, status: 'draft' };
+}
+
 app.post('/billing/create-subscription', async (req, res) => {
   try {
     const { client_id, price_id } = req.body;
