@@ -182,11 +182,58 @@ app.post('/feedback', async (req, res) => {
   try {
     const { draft_id, client_id, feedback_text } = req.body;
     if (!draft_id || !client_id || !feedback_text) return res.status(400).json({ error: 'draft_id, client_id, feedback_text required' });
+
+    // Get client, draft, and brief
     const { data: client } = await supabase.from('clients').select('*').eq('id', client_id).single();
-    const { data: brief } = await supabase.from('content_briefs').select('title').eq('id', (await supabase.from('drafts').select('brief_id').eq('id', draft_id).single()).data?.brief_id).single();
-    await sendFeedbackEmail(client, brief?.title || 'Untitled piece', feedback_text);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const { data: draft } = await supabase.from('drafts').select('*, content_briefs(title, content_type)').eq('id', draft_id).single();
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+
+    const originalContent = draft.edited_content || draft.content;
+    const title = draft.content_briefs?.title || 'Untitled';
+
+    // Respond immediately — revision happens in background
+    res.json({ success: true, message: 'Revision in progress — check your portal in a moment' });
+
+    // Auto-revise using Claude
+    try {
+      const revisionMsg = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        system: client.brand_voice_prompt + '\n\nYou are revising existing content based on client feedback. Apply the requested changes while keeping the same overall structure, voice, and purpose. Only change what the feedback asks for.',
+        messages: [{
+          role: 'user',
+          content: 'Please revise this content based on the following feedback.\n\nORIGINAL CONTENT:\n' + originalContent + '\n\nCLIENT FEEDBACK:\n' + feedback_text + '\n\nRevise the content applying exactly what the client asked for. Return only the revised content, no explanations.'
+        }]
+      });
+
+      const revisedContent = revisionMsg.content[0].text;
+
+      // Save revised content back to draft
+      await supabase.from('drafts').update({
+        content: revisedContent,
+        edited_content: revisedContent,
+        status: 'draft'
+      }).eq('id', draft_id);
+
+      // Notify client their revision is ready
+      await sendEmail({
+        to: client.contact_email,
+        subject: 'Your revised content is ready — ' + title,
+        html: emailStyle('<h1 style="font-size:24px;font-weight:700;margin-bottom:12px;">Revision complete.</h1><p style="color:#8a87aa;line-height:1.7;margin-bottom:20px;">We\'ve updated <strong style="color:#f0eeff;">' + title + '</strong> based on your feedback.</p><p style="color:#8a87aa;margin-bottom:24px;">Log in to review the revised version and approve when you\'re happy.</p><a href="' + PORTAL_URL + '" style="display:inline-block;padding:12px 24px;background:#9B7FEF;color:#000;font-weight:700;border-radius:10px;text-decoration:none;">Review revision</a>')
+      });
+
+      // Notify operator too
+      await sendFeedbackEmail(client, title, feedback_text + '\n\n[Revision auto-generated and saved to portal]');
+
+      console.log('Auto-revision complete for draft:', draft_id);
+    } catch (revErr) {
+      console.error('Auto-revision failed:', revErr.message);
+      // Still notify operator so they can revise manually
+      await sendFeedbackEmail(client, title, feedback_text);
+    }
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/clients', async (req, res) => {
