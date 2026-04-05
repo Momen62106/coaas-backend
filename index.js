@@ -319,6 +319,57 @@ app.get('/drafts/:client_id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── Onboarding endpoint ─────────────────────────────────
+app.post('/onboard', async (req, res) => {
+  try {
+    const { company_name, contact_email } = req.body;
+    if (!company_name || !contact_email) return res.status(400).json({ error: 'company_name and contact_email required' });
+    const brand_voice_prompt = buildBrandVoicePrompt(req.body);
+    const { data, error } = await supabase.from('clients').insert([{
+      ...req.body, brand_voice_prompt, status: 'active', onboarding_completed: true
+    }]).select().single();
+    if (error) throw error;
+    const accessCode = data.id.replace(/-/g,'').slice(-6).toUpperCase();
+    // Send welcome email
+    sendWelcomeEmail(data, accessCode).catch(console.error);
+    // Auto-generate first month content
+    fetch('http://localhost:' + PORT + '/generate-monthly/' + data.id, { method: 'POST' }).catch(console.error);
+    res.status(201).json({ success: true, client: data, access_code: accessCode });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Update client onboarding info
+app.patch('/clients/:id/onboard', async (req, res) => {
+  try {
+    const brand_voice_prompt = buildBrandVoicePrompt(req.body);
+    const { data, error } = await supabase.from('clients').update({ ...req.body, brand_voice_prompt, onboarding_completed: true }).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    // Auto-generate content after onboarding
+    fetch('http://localhost:' + PORT + '/generate-monthly/' + req.params.id, { method: 'POST' }).catch(console.error);
+    res.json({ success: true, client: data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Edit draft content
+app.patch('/drafts/:id/edit', async (req, res) => {
+  try {
+    const { edited_content } = req.body;
+    const { data, error } = await supabase.from('drafts').update({ edited_content, content: edited_content }).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ success: true, draft: data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Schedule draft
+app.patch('/drafts/:id/schedule', async (req, res) => {
+  try {
+    const { scheduled_date, scheduled_platform } = req.body;
+    const { data, error } = await supabase.from('drafts').update({ scheduled_date, scheduled_platform, publish_status: 'scheduled' }).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ success: true, draft: data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/billing/create-subscription', async (req, res) => {
   try {
     const { client_id, price_id } = req.body;
@@ -377,6 +428,23 @@ cron.schedule('0 8 1 * *', async () => {
     }
   } catch (err) { console.error('Cron error:', err); }
 });
+
+// Platform-specific content type mapping
+function getPlatformContentTypes(platforms, tier) {
+  if (!platforms || platforms.length === 0) return null;
+  const map = {
+    'Blog/WordPress': { content_type: 'Blog Post', word_count: 1000 },
+    'Email Newsletter': { content_type: 'Email Newsletter', word_count: 450 },
+    'Instagram': { content_type: 'Social Media Post', word_count: 150, note: 'Write as an Instagram caption with emojis' },
+    'Facebook': { content_type: 'Social Media Post', word_count: 200, note: 'Write as a Facebook post' },
+    'LinkedIn': { content_type: 'LinkedIn Post', word_count: 250 },
+    'Twitter/X': { content_type: 'Social Media Post', word_count: 80, note: 'Write as a tweet under 280 characters' },
+    'TikTok': { content_type: 'Social Media Post', word_count: 150, note: 'Write as a TikTok video script hook and key points' },
+    'Google Business': { content_type: 'Social Media Post', word_count: 150, note: 'Write as a Google Business post' },
+    'YouTube': { content_type: 'Social Media Post', word_count: 200, note: 'Write as a YouTube video description' },
+  };
+  return platforms.map(p => map[p]).filter(Boolean);
+}
 
 function buildBrandVoicePrompt(data) {
   const tones = Array.isArray(data.tones) ? data.tones.join(', ') : (data.tones || 'professional, friendly');
