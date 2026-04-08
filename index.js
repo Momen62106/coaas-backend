@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_PI_KEY });
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const PORTAL_URL = 'https://lumetraagency.com/portal.html';
 const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL || 'lumetra1agency@gmail.com';
@@ -624,4 +624,19 @@ function buildContentPrompt(brief) {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Lumetra backend running on port ' + PORT));
+// Client-requested content generation
+app.post('/generate-content', async (req, res) => {
+  try {
+    const { client_id, content_type, topic, notes, platform } = req.body;
+    if (!client_id || !content_type) return res.status(400).json({ error: 'client_id and content_type required' });
+    const { data: client } = await supabase.from('clients').select('*').eq('id', client_id).single();
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const prompt = `Write a ${content_type} for ${client.company_name || client.name}${topic ? ' about: ' + topic : ''}.${notes ? ' Key points: ' + notes : ''}${platform ? ' For: ' + platform : ''}. Brand voice: ${(client.tones||[]).join(', ')||'professional'}. Write complete publish-ready content.`;
+    const msg = await anthropic.messages.create({ model: 'claude-opus-4-5', max_tokens: 1500, messages: [{ role: 'user', content: prompt }] });
+    const content = msg.content[0].text;
+    const title = topic || (content_type + ' - ' + new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'}));
+    const { data: brief } = await supabase.from('content_briefs').insert([{ client_id, title, content_type, status: 'generated' }]).select().single();
+    const { data: draft } = await supabase.from('drafts').insert([{ client_id, brief_id: brief?.id, content, status: 'pending_review' }]).select().single();
+    res.json({ success: true, draft_id: draft?.id, message: 'Content generated' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});app.listen(PORT, () => console.log('Lumetra backend running on port ' + PORT));
